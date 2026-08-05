@@ -41,6 +41,7 @@ const mediaAssetSchema = new mongoose.Schema(
       medium: { type: String, default: "" },
       large: { type: String, default: "" },
     },
+    cloudinaryPublicId: { type: String, default: "" },
   },
   { timestamps: true }
 );

@@ -1,9 +1,23 @@
 const express = require("express");
 const router = express.Router();
+const multer = require("multer");
+const storage = multer.memoryStorage();
+const upload = multer({
+  storage,
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB max file size
+});
+
 const MediaAsset = require("../models/MediaAsset");
 const ThemeConfig = require("../models/ThemeConfig");
 const CMSPage = require("../models/CMSPage");
 const Product = require("../models/Product");
+const {
+  isCloudinaryConfigured,
+  uploadBufferToCloudinary,
+  uploadToCloudinary,
+  deleteFromCloudinary,
+  getCloudinaryVariants,
+} = require("../config/cloudinary");
 
 // Initial Seed Data for Luxury Brand Media Assets
 const DEFAULT_MEDIA = [
@@ -213,25 +227,131 @@ router.get("/", async (req, res) => {
   }
 });
 
-// POST /api/media/upload — Upload media asset
-router.post("/upload", async (req, res) => {
-  try {
-    const { filename, url, fileType, folder, altText, tags, title, description } = req.body;
+// GET /api/media/cloudinary-status — Check Cloudinary configuration state
+router.get("/cloudinary-status", (req, res) => {
+  res.json({
+    success: true,
+    configured: isCloudinaryConfigured(),
+    cloudName: process.env.CLOUDINARY_CLOUD_NAME || null,
+    folder: process.env.CLOUDINARY_FOLDER || "gormenswear",
+  });
+});
 
-    if (!url || !filename) {
-      return res.status(400).json({ success: false, error: "Filename and URL are required." });
+// POST /api/media/upload-file — Upload binary file directly to Cloudinary
+router.post("/upload-file", upload.single("file"), async (req, res) => {
+  try {
+    const file = req.file;
+    const { folder, altText, title, description, tags } = req.body;
+
+    if (!file) {
+      return res.status(400).json({ success: false, error: "No file uploaded." });
     }
 
-    if (filename.length > 150) {
-      return res.status(400).json({ success: false, error: "Filename exceeds 150 characters." });
+    const filename = req.body.filename || file.originalname;
+    const isVideo = file.mimetype.startsWith("video");
+    const fileType = isVideo ? "video" : "image";
+    let mediaUrl = "";
+    let cloudinaryPublicId = "";
+    let dimensions = { width: 1920, height: 1080 };
+    let variants = {};
+
+    if (isCloudinaryConfigured()) {
+      const cloudResult = await uploadBufferToCloudinary(file.buffer, {
+        folder: folder || "Hero Images",
+        resourceType: isVideo ? "video" : "image",
+      });
+
+      mediaUrl = cloudResult.secure_url;
+      cloudinaryPublicId = cloudResult.public_id;
+      if (cloudResult.width && cloudResult.height) {
+        dimensions = { width: cloudResult.width, height: cloudResult.height };
+      }
+      variants = getCloudinaryVariants(cloudResult.public_id) || {
+        thumbnail: mediaUrl,
+        small: mediaUrl,
+        medium: mediaUrl,
+        large: mediaUrl,
+      };
+    } else {
+      // Fallback if Cloudinary is not configured yet
+      const base64 = file.buffer.toString("base64");
+      mediaUrl = `data:${file.mimetype};base64,${base64}`;
+      variants = { thumbnail: mediaUrl, small: mediaUrl, medium: mediaUrl, large: mediaUrl };
     }
 
     const initialUsages = [{ label: "Newly Uploaded Asset", href: "/admin/media" }];
 
     const asset = await MediaAsset.create({
       filename,
-      url,
-      fileType: fileType || (url.endsWith(".mp4") ? "video" : "image"),
+      url: mediaUrl,
+      fileType,
+      mimeType: file.mimetype,
+      size: file.size,
+      dimensions,
+      folder: folder || "Hero Images",
+      title: title || filename,
+      altText: altText || filename,
+      description: description || "",
+      tags: tags ? (Array.isArray(tags) ? tags : tags.split(",")) : ["uploaded", "2026", "cloudinary"],
+      usageCount: initialUsages.length,
+      usedIn: initialUsages,
+      uploadedBy: req?.user?.name || "Super Admin",
+      cloudinaryPublicId,
+      variants,
+    });
+
+    res.status(201).json({ success: true, asset, cloudinaryConfigured: isCloudinaryConfigured() });
+  } catch (error) {
+    res.status(500).json({ success: false, error: "Failed to upload file to Cloudinary: " + error.message });
+  }
+});
+
+// POST /api/media/upload — Upload media asset (JSON / Data URI / Remote URL)
+router.post("/upload", async (req, res) => {
+  try {
+    let { filename, url, fileData, fileType, folder, altText, tags, title, description } = req.body;
+
+    const sourceFile = fileData || url;
+    if (!sourceFile || !filename) {
+      return res.status(400).json({ success: false, error: "Filename and file URL/Data are required." });
+    }
+
+    if (filename.length > 150) {
+      return res.status(400).json({ success: false, error: "Filename exceeds 150 characters." });
+    }
+
+    let mediaUrl = url || sourceFile;
+    let cloudinaryPublicId = "";
+    let dimensions = { width: 1920, height: 1080 };
+    let variants = { thumbnail: mediaUrl, small: mediaUrl, medium: mediaUrl, large: mediaUrl };
+
+    const isVideo = fileType === "video" || (typeof mediaUrl === "string" && mediaUrl.endsWith(".mp4"));
+    const resourceType = isVideo ? "video" : "image";
+
+    if (isCloudinaryConfigured() && (sourceFile.startsWith("data:") || sourceFile.startsWith("http"))) {
+      try {
+        const cloudResult = await uploadToCloudinary(sourceFile, {
+          folder: folder || "Hero Images",
+          resourceType,
+        });
+
+        mediaUrl = cloudResult.secure_url;
+        cloudinaryPublicId = cloudResult.public_id;
+        if (cloudResult.width && cloudResult.height) {
+          dimensions = { width: cloudResult.width, height: cloudResult.height };
+        }
+        variants = getCloudinaryVariants(cloudResult.public_id) || variants;
+      } catch (cloudErr) {
+        console.error("Cloudinary upload warning:", cloudErr.message);
+      }
+    }
+
+    const initialUsages = [{ label: "Newly Uploaded Asset", href: "/admin/media" }];
+
+    const asset = await MediaAsset.create({
+      filename,
+      url: mediaUrl,
+      fileType: fileType || (isVideo ? "video" : "image"),
       folder: folder || "Hero Images",
       title: title || filename,
       altText: altText || filename,
@@ -240,12 +360,8 @@ router.post("/upload", async (req, res) => {
       usageCount: initialUsages.length,
       usedIn: initialUsages,
       uploadedBy: req?.user?.name || "Super Admin",
-      variants: {
-        thumbnail: url,
-        small: url,
-        medium: url,
-        large: url,
-      },
+      cloudinaryPublicId,
+      variants,
     });
 
     try {
@@ -257,7 +373,7 @@ router.post("/upload", async (req, res) => {
       });
     } catch (e) {}
 
-    res.status(201).json({ success: true, asset });
+    res.status(201).json({ success: true, asset, cloudinaryConfigured: isCloudinaryConfigured() });
   } catch (error) {
     res.status(500).json({ success: false, error: "Failed to upload asset: " + error.message });
   }
@@ -400,6 +516,10 @@ router.delete("/:id", async (req, res) => {
       });
     }
 
+    if (asset.cloudinaryPublicId && isCloudinaryConfigured()) {
+      await deleteFromCloudinary(asset.cloudinaryPublicId, asset.fileType === "video" ? "video" : "image");
+    }
+
     await MediaAsset.findByIdAndDelete(req.params.id);
     res.json({ success: true, message: "Media asset deleted successfully." });
   } catch (error) {
@@ -423,6 +543,14 @@ router.post("/bulk", async (req, res) => {
     } else if (action === "tag" && tag) {
       await MediaAsset.updateMany({ _id: { $in: ids } }, { $addToSet: { tags: tag } });
     } else if (action === "delete") {
+      if (isCloudinaryConfigured()) {
+        const assetsToDelete = await MediaAsset.find({ _id: { $in: ids }, cloudinaryPublicId: { $ne: "" } });
+        for (const asset of assetsToDelete) {
+          if (asset.cloudinaryPublicId) {
+            await deleteFromCloudinary(asset.cloudinaryPublicId, asset.fileType === "video" ? "video" : "image");
+          }
+        }
+      }
       await MediaAsset.deleteMany({ _id: { $in: ids } });
     }
 
