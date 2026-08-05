@@ -17,10 +17,10 @@ const loginLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-// Helper for cookie options
+// Helper for cookie options (Supports cross-domain cookies in production)
 const getCookieOptions = () => ({
   httpOnly: true,
-  sameSite: "lax",
+  sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
   secure: process.env.NODE_ENV === "production",
   maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
 });
