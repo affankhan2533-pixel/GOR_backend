@@ -44,7 +44,7 @@ const productSchema = new mongoose.Schema(
     origin: { type: String, default: "" },
     deletedAt: { type: Date, default: null },
   },
-  { timestamps: true }
+  { timestamps: true, suppressReservedKeysWarning: true }
 );
 
 productSchema.index({ status: 1, stock: 1 });
